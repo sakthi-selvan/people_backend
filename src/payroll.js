@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { isExited } from './constants.js'
 import { getDb, publicUser, saveDb } from './store.js'
 import { attendanceDay, monthKey, monthsCovered, nextIsoDate, todayKey, workingDatesInRange } from './util.js'
 import { sendMail } from './mailer.js'
@@ -94,6 +95,11 @@ export function getRangeAttendance(userId, from, to) {
 }
 
 export function processSalary(user, from, to, actorId) {
+  if (isExited(user)) {
+    const error = new Error('Inactive people are not processed for payroll')
+    error.status = 409
+    throw error
+  }
   const db = getDb()
   const summary = getRangeAttendance(user.id, from, to)
   const payableDays = Math.max(summary.workingDays - summary.leaveDays, 0)

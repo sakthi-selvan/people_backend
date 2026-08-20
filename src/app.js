@@ -394,6 +394,10 @@ app.post('/api/users/:id/face', requireAuth(['admin', 'hr', 'employee', 'device'
     res.status(403).json({ error: 'Not allowed' })
     return
   }
+  if (isExited(user)) {
+    res.status(403).json({ error: INACTIVE_MESSAGE })
+    return
+  }
   if (!Array.isArray(req.body?.descriptor)) {
     res.status(400).json({ error: 'Face capture required' })
     return
@@ -463,7 +467,11 @@ app.get('/api/attendance/summary', requireAuth(['admin', 'hr', 'manager', 'emplo
   const now = new Date()
   const year = Number(req.query.year || now.getFullYear())
   const month = Number(req.query.month || now.getMonth() + 1)
-  let users = getDb().users.filter((u) => u.role === 'employee' || u.baseSalary)
+  let users = getDb().users.filter((u) => (u.role === 'employee' || u.baseSalary) && !isExited(u))
+  if (req.query.userId) {
+    const one = getDb().users.find((u) => u.id === req.query.userId)
+    if (one) users = [one]
+  }
   if (req.actor.role === 'employee') users = users.filter((u) => u.id === req.actor.sub)
   if (req.actor.role === 'manager') users = users.filter((u) => u.managerId === req.actor.sub || u.id === req.actor.sub)
   res.json(users.map((u) => ({ user: publicUser(u), ...getMonthAttendance(u.id, year, month) })))
@@ -476,6 +484,11 @@ app.post('/api/attendance/approve', requireAuth(['admin', 'hr', 'manager']), (re
     return
   }
   const db = getDb()
+  const person = db.users.find((u) => u.id === userId)
+  if (person && isExited(person)) {
+    res.status(409).json({ error: 'Inactive people are not included in attendance processing. Open their record to view past attendance.' })
+    return
+  }
   db.monthlyApprovals = db.monthlyApprovals.filter((a) => !(a.userId === userId && a.month === month))
   db.monthlyApprovals.push({
     id: randomUUID(),
@@ -810,14 +823,22 @@ app.post('/api/payroll/run', requireAuth(['hr']), (req, res) => {
       res.status(404).json({ error: 'Person not found' })
       return
     }
+    if (isExited(person)) {
+      res.status(409).json({ error: 'Inactive people are not processed for payroll. Open their record to view past payslips.' })
+      return
+    }
     users = [person]
   } else {
-    users = db.users.filter((u) => u.role === 'employee' && u.hrStep >= 7 && u.status !== 'exited')
+    users = db.users.filter((u) => u.role === 'employee' && u.hrStep >= 7 && !isExited(u))
   }
 
   const skipped = []
   const toProcess = []
   for (const person of users) {
+    if (isExited(person)) {
+      skipped.push({ name: person.name, reason: 'Inactive — not processed for payroll.' })
+      continue
+    }
     const overlap = overlappingSalaries(person.id, from, to)
     const paid = overlap.filter((row) => row.emailedAt)
     if (paid.length) {
