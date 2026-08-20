@@ -17,7 +17,7 @@ import { emailPayslip, getMonthAttendance, overlappingSalaries, payrollInsights,
 import { createUser } from './seed.js'
 import { getDb, publicUser, saveDb, dataDir } from './store.js'
 import { todayKey, punchState, syncAttendanceRow, sessionHours, sessionsOf, SHIFT_HOURS, MAX_SESSIONS } from './util.js'
-import { completeStep, getJourney, getTemplates, previewLetter, listPendingApprovals } from './workflow.js'
+import { completeStep, getJourney, getTemplates, previewLetter, listPendingApprovals, cancelResignation } from './workflow.js'
 import { TEMPLATE_KEYS } from './templates.js'
 import { saveFacePhoto } from './photos.js'
 
@@ -176,6 +176,34 @@ app.post('/api/users/:id/reset-password', requireAuth(['hr']), async (req, res) 
   user.passwordHash = await hashPassword(password)
   saveDb()
   res.json({ ok: true, user: publicUser(user) })
+})
+
+// HR can deactivate/delete an employee before the appointment stage.
+// We mark them as exited so login and all employee actions stop working immediately.
+app.post('/api/users/:id/delete', requireAuth(['hr']), (req, res) => {
+  const db = getDb()
+  const user = db.users.find((u) => u.id === req.params.id)
+  if (!user) {
+    res.status(404).json({ error: 'User not found' })
+    return
+  }
+  if (user.role !== 'employee') {
+    res.status(409).json({ error: 'Only employees can be deleted' })
+    return
+  }
+  if (isExited(user)) {
+    res.status(409).json({ error: 'This person is already inactive' })
+    return
+  }
+  // Appointment letter is step 6; before that, HR can "delete" the employee record.
+  if (user.hrStep >= 6) {
+    res.status(409).json({ error: 'Cannot delete after appointment stage' })
+    return
+  }
+
+  user.status = 'exited'
+  saveDb()
+  res.json({ ok: true, journey: getJourney(user.id) })
 })
 
 app.get('/api/users/:id', requireAuth(), (req, res) => {
@@ -618,6 +646,34 @@ app.get('/api/users/:id/journey', requireAuth(), (req, res) => {
     return
   }
   res.json(journey)
+})
+
+app.post('/api/users/:id/resignation/cancel', requireAuth(['hr', 'admin', 'manager']), (req, res) => {
+  try {
+    const db = getDb()
+    const user = db.users.find((u) => u.id === req.params.id)
+    if (!user) {
+      res.status(404).json({ error: 'User not found' })
+      return
+    }
+    if (user.role !== 'employee') {
+      res.status(409).json({ error: 'Only employees can cancel resignation' })
+      return
+    }
+    if (isExited(user)) {
+      res.status(409).json({ error: 'Resignation cannot be cancelled after exit is complete' })
+      return
+    }
+    if (user.hrStep < 13) {
+      res.status(409).json({ error: 'No resignation in progress' })
+      return
+    }
+
+    const journey = cancelResignation(user, req.actor, { note: String(req.body?.note || '').trim() })
+    res.json({ journey })
+  } catch (err) {
+    res.status(err.status || 500).json({ error: err.message || 'Could not cancel resignation' })
+  }
 })
 
 app.post('/api/users/:id/documents', requireAuth(['admin', 'hr', 'employee']), (req, res) => {

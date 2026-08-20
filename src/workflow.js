@@ -36,7 +36,14 @@ export function getJourney(userId) {
   const canStartProbation = user.status !== 'exited' && user.hrStep >= 7 && user.hrStep < 11
   const spec = nextStep ? HR_STEPS.find((s) => s.id === nextStep) : null
   const documentRequest = user.documentRequest || null
-  const resignation = [...events].reverse().find((e) => e.step === 13 && e.action === 'complete') || null
+  const resignationComplete = [...events].reverse().find((e) => e.step === 13 && e.action === 'complete') || null
+  const resignationCancelled =
+    [...events].reverse().find((e) => e.step === 13 && e.action === 'cancel_resignation') || null
+  // If HR cancelled the resignation after it was submitted, hide the resignation preview.
+  const resignation =
+    resignationComplete && (!resignationCancelled || resignationCancelled.at <= resignationComplete.at)
+      ? resignationComplete
+      : null
   const waitingOn = documentRequest?.open
     ? 'employee'
     : spec
@@ -69,7 +76,13 @@ export function listPendingApprovals() {
     if (user.role !== 'employee' || isExited(user)) continue
     const documents = db.documents.filter((d) => d.userId === user.id)
     const events = (db.workflowEvents || []).filter((e) => e.userId === user.id)
-    const resignation = [...events].reverse().find((e) => e.step === 13 && e.action === 'complete') || null
+    const resignationComplete = [...events].reverse().find((e) => e.step === 13 && e.action === 'complete') || null
+    const resignationCancelled =
+      [...events].reverse().find((e) => e.step === 13 && e.action === 'cancel_resignation') || null
+    const resignation =
+      resignationComplete && (!resignationCancelled || resignationCancelled.at <= resignationComplete.at)
+        ? resignationComplete
+        : null
     const req = user.documentRequest
     const nextStep = nextLifecycleStep(user.hrStep)
     const spec = nextStep ? HR_STEPS.find((s) => s.id === nextStep) : null
@@ -127,6 +140,40 @@ export function listPendingApprovals() {
     })
   }
   return items.sort((a, b) => a.priority - b.priority || a.user.name.localeCompare(b.user.name))
+}
+
+export function cancelResignation(user, actor, { note = '' } = {}) {
+  const db = getDb()
+  if (!user || user.role !== 'employee') {
+    const error = new Error('User not found')
+    error.status = 404
+    throw error
+  }
+  if (isExited(user)) {
+    const error = new Error('Resignation cannot be cancelled after exit is complete')
+    error.status = 409
+    throw error
+  }
+
+  // Record the cancellation in workflow history so journey/resignation preview can hide it.
+  db.workflowEvents = db.workflowEvents || []
+  db.workflowEvents.push({
+    id: randomUUID(),
+    userId: user.id,
+    step: 13,
+    action: 'cancel_resignation',
+    note: String(note || '').trim(),
+    by: actor?.sub,
+    role: actor?.role,
+    at: new Date().toISOString(),
+  })
+
+  // Reset the lifecycle back to the end of joining (appointment stage).
+  user.hrStep = 12
+  if (user.status !== 'exited') user.status = 'active'
+  saveDb()
+
+  return getJourney(user.id)
 }
 
 function clearDocumentRequest(user, submitted = false) {
