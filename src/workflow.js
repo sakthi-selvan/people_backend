@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { HR_STEPS } from './constants.js'
+import { HR_STEPS, nextLifecycleStep } from './constants.js'
 import { sendMail } from './mailer.js'
 import { getDb, publicUser, saveDb } from './store.js'
 import { DEFAULT_TEMPLATES, letterVars, renderTemplate, TEMPLATE_KEYS } from './templates.js'
@@ -30,9 +30,10 @@ export function getJourney(userId) {
   const documents = db.documents.filter((d) => d.userId === userId)
   const events = (db.workflowEvents || []).filter((e) => e.userId === userId)
   const emails = (db.emails || []).filter((e) => e.userId === userId)
-  const nextStep = user.hrStep >= 18 ? null : user.hrStep === 12 ? null : user.hrStep + 1
+  const nextStep = nextLifecycleStep(user.hrStep)
   const facePending = user.hrStep >= 6 && user.status !== 'exited' && !user.faceDescriptor
   const canRequestResignation = user.status !== 'exited' && user.hrStep === 12
+  const canStartProbation = user.status !== 'exited' && user.hrStep >= 7 && user.hrStep < 11
   const spec = nextStep ? HR_STEPS.find((s) => s.id === nextStep) : null
   const waitingOn = canRequestResignation
     ? 'employee'
@@ -51,6 +52,7 @@ export function getJourney(userId) {
     nextStep,
     facePending,
     canRequestResignation,
+    canStartProbation,
     waitingOn,
     templates: getTemplates(),
   }
@@ -61,7 +63,7 @@ export function listPendingApprovals() {
   const items = []
   for (const user of db.users) {
     if (user.role !== 'employee' || user.status === 'exited') continue
-    const nextStep = user.hrStep >= 18 ? null : user.hrStep === 12 ? null : user.hrStep + 1
+    const nextStep = nextLifecycleStep(user.hrStep)
     const spec = nextStep ? HR_STEPS.find((s) => s.id === nextStep) : null
     const canRequestResignation = user.hrStep === 12
     if (canRequestResignation) {
@@ -85,9 +87,26 @@ export function listPendingApprovals() {
   return items.sort((a, b) => a.user.name.localeCompare(b.user.name))
 }
 
-export async function completeStep(user, actor, { skip = false, note = '', documents = [], subject, body } = {}) {
+export async function completeStep(user, actor, { skip = false, note = '', documents = [], subject, body, start } = {}) {
   const db = getDb()
-  const nextStep = user.hrStep + 1
+  let nextStep = start === 'probation' ? 11 : user.hrStep + 1
+  if (start === 'probation') {
+    if (!isHrRole(actor.role)) {
+      const error = new Error('Only HR can start probation review')
+      error.status = 403
+      throw error
+    }
+    if (user.hrStep < 7 || user.hrStep >= 11) {
+      const error = new Error('This person is not in active employment')
+      error.status = 409
+      throw error
+    }
+  }
+  if (!start && nextStep >= 8 && nextStep <= 10) {
+    const error = new Error('Salary and payslips are run from Payroll using attendance. They are not a person stage.')
+    error.status = 409
+    throw error
+  }
   if (nextStep > 18) {
     const error = new Error('Lifecycle already complete')
     error.status = 409

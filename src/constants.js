@@ -32,3 +32,16 @@ export const ATTENDANCE_FLOW = [
 ]
 
 export const FACE_THRESHOLD = 0.55
+
+export const OPS_STEP_IDS = [8, 9, 10]
+
+export function nextLifecycleStep(hrStep) {
+  if (hrStep >= 18) return null
+  if (hrStep === 12) return null
+  if (hrStep >= 7 && hrStep < 11) return null
+  return hrStep + 1
+}
+
+export function isOpsStep(id) {
+  return OPS_STEP_IDS.includes(id)
+}

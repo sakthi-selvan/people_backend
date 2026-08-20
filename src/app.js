@@ -645,6 +645,7 @@ app.post('/api/users/:id/workflow', requireAuth(['admin', 'hr', 'manager', 'empl
       documents: Array.isArray(req.body?.documents) ? req.body.documents : [],
       subject: req.body?.subject,
       body: req.body?.body,
+      start: req.body?.start,
     })
     res.json(result)
   } catch (err) {
@@ -769,7 +770,6 @@ app.post('/api/payroll/run', requireAuth(['hr']), (req, res) => {
       to,
       generatedAt: new Date().toISOString(),
     })
-    if (u.hrStep < 9) u.hrStep = 9
   })
   saveDb()
   res.json({
@@ -820,7 +820,6 @@ app.post('/api/payroll/:id/payslip', requireAuth(['hr']), (req, res) => {
     generatedAt: new Date().toISOString(),
   }
   getDb().payslips.push(slip)
-  if (user.hrStep < 9) user.hrStep = 9
   saveDb()
   res.json(slip)
 })
@@ -839,7 +838,6 @@ app.post('/api/payroll/:id/email', requireAuth(['hr']), async (req, res) => {
     const user = getDb().users.find((u) => u.id === salary.userId)
     const slip = await emailPayslip(user, salary)
     salary.emailedAt = slip.emailedAt
-    if (user.hrStep < 10) user.hrStep = 10
     saveDb()
     res.json(slip)
   } catch (err) {
