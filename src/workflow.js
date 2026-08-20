@@ -31,7 +31,7 @@ export function getJourney(userId) {
   const events = (db.workflowEvents || []).filter((e) => e.userId === userId)
   const emails = (db.emails || []).filter((e) => e.userId === userId)
   const nextStep = user.hrStep >= 18 ? null : user.hrStep + 1
-  const facePending = user.hrStep >= 7 && user.status !== 'exited' && !user.faceDescriptor
+  const facePending = user.hrStep >= 6 && user.status !== 'exited' && !user.faceDescriptor
   return {
     user: publicUser(user),
     steps: HR_STEPS,

@@ -15,7 +15,7 @@ import { sendMail } from './mailer.js'
 import { emailPayslip, getMonthAttendance, overlappingSalaries, payrollInsights, periodOf, periodLabel, processSalary } from './payroll.js'
 import { createUser } from './seed.js'
 import { getDb, publicUser, saveDb, dataDir } from './store.js'
-import { todayKey, punchState, syncAttendanceRow, sessionHours, sessionsOf, SHIFT_HOURS } from './util.js'
+import { todayKey, punchState, syncAttendanceRow, sessionHours, sessionsOf, SHIFT_HOURS, MAX_SESSIONS } from './util.js'
 import { completeStep, getJourney, getTemplates, previewLetter } from './workflow.js'
 import { TEMPLATE_KEYS } from './templates.js'
 import { saveFacePhoto } from './photos.js'
@@ -280,38 +280,52 @@ app.post('/api/kiosk/identify', requireAuth(['device']), (req, res) => {
 })
 
 app.post('/api/kiosk/enroll', requireAuth(['device']), async (req, res) => {
-  const { name, email, descriptor, password, photo } = req.body || {}
-  if (!name || !email || !Array.isArray(descriptor)) {
-    res.status(400).json({ error: 'Name, email and face capture are required' })
+  const name = String(req.body?.name || '').trim()
+  const email = String(req.body?.email || '').trim().toLowerCase()
+  const password = String(req.body?.password || '')
+  const descriptor = req.body?.descriptor
+  if (!name || !email || !password || !Array.isArray(descriptor)) {
+    res.status(400).json({ error: 'Name, work email, password and face capture are required' })
+    return
+  }
+  const db = getDb()
+  const user = db.users.find((u) => u.email === email)
+  if (!user) {
+    res.status(404).json({ error: 'This person is not in People. HR must add them first.' })
+    return
+  }
+  if (user.name.trim() !== name) {
+    res.status(400).json({ error: 'Name must match the People record exactly' })
+    return
+  }
+  if (!(await verifyPassword(password, user.passwordHash))) {
+    res.status(401).json({ error: 'Password does not match' })
+    return
+  }
+  if (user.status === 'exited') {
+    res.status(409).json({ error: 'This person has exited' })
+    return
+  }
+  if (user.hrStep < 6) {
+    res.status(409).json({ error: 'Face enrolment is allowed only after the appointment letter' })
+    return
+  }
+  if (user.faceDescriptor) {
+    res.status(409).json({ error: 'This person already has a face enrolled' })
     return
   }
   if (identifyFace(descriptor)) {
     res.status(409).json({ error: 'This face is already enrolled' })
     return
   }
-  if (getDb().users.some((u) => u.email === String(email).toLowerCase())) {
-    res.status(409).json({ error: 'Email already exists' })
-    return
-  }
-  const passwordHash = await hashPassword(password || 'Welcome@123')
-  const user = createUser(
-    {
-      name,
-      email,
-      role: 'employee',
-      hrStep: 7,
-      status: 'active',
-      passwordHash,
-      joiningDate: todayKey(),
-    },
-    { faceDescriptor: descriptor },
-  )
-  const facePhoto = saveFacePhoto(photo)
-  if (facePhoto) {
-    user.facePhoto = facePhoto
-    saveDb()
-  }
-  res.status(201).json(kioskUserJson(user))
+  user.faceDescriptor = descriptor
+  user.faceEnrolledAt = new Date().toISOString()
+  const facePhoto = saveFacePhoto(req.body?.photo)
+  if (facePhoto) user.facePhoto = facePhoto
+  if (user.hrStep < 7) user.hrStep = 7
+  if (user.status === 'offer') user.status = 'active'
+  saveDb()
+  res.json(kioskUserJson(user))
 })
 
 app.post('/api/kiosk/punch', requireAuth(['device']), (req, res) => {
