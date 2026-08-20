@@ -28,6 +28,18 @@ export function readToken(req) {
   }
 }
 
+export const INACTIVE_MESSAGE = 'This account is inactive. You have exited the company.'
+
+function rejectIfExited(req, res) {
+  if (req.actor?.role === 'device') return false
+  const user = getDb().users.find((u) => u.id === req.actor.sub)
+  if (user?.status === 'exited') {
+    res.status(403).json({ error: INACTIVE_MESSAGE })
+    return true
+  }
+  return false
+}
+
 export function requireAuth(roles) {
   return (req, res, next) => {
     const payload = readToken(req)
@@ -42,6 +54,7 @@ export function requireAuth(roles) {
         return
       }
       req.actor = { ...payload, role: asHr }
+      if (rejectIfExited(req, res)) return
       next()
       return
     }
@@ -49,6 +62,7 @@ export function requireAuth(roles) {
       ...payload,
       role: payload.role === 'admin' || payload.role === 'manager' ? 'hr' : payload.role,
     }
+    if (rejectIfExited(req, res)) return
     next()
   }
 }

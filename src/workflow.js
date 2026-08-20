@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { HR_STEPS, nextLifecycleStep } from './constants.js'
+import { canRequestResignation, HR_STEPS, isExited, nextLifecycleStep } from './constants.js'
 import { sendMail } from './mailer.js'
 import { getDb, publicUser, saveDb } from './store.js'
 import { DEFAULT_TEMPLATES, letterVars, renderTemplate, TEMPLATE_KEYS } from './templates.js'
@@ -32,10 +32,12 @@ export function getJourney(userId) {
   const emails = (db.emails || []).filter((e) => e.userId === userId)
   const nextStep = nextLifecycleStep(user.hrStep)
   const facePending = user.hrStep >= 6 && user.status !== 'exited' && !user.faceDescriptor
-  const canRequestResignation = user.status !== 'exited' && user.hrStep === 12
+  const resignable = canRequestResignation(user)
   const canStartProbation = user.status !== 'exited' && user.hrStep >= 7 && user.hrStep < 11
   const spec = nextStep ? HR_STEPS.find((s) => s.id === nextStep) : null
-  const waitingOn = canRequestResignation
+  const documentRequest = user.documentRequest || null
+  const resignation = [...events].reverse().find((e) => e.step === 13 && e.action === 'complete') || null
+  const waitingOn = documentRequest?.open
     ? 'employee'
     : spec
       ? spec.actor === 'employee' || spec.actor === 'employee_head'
@@ -51,9 +53,11 @@ export function getJourney(userId) {
     emails,
     nextStep,
     facePending,
-    canRequestResignation,
+    canRequestResignation: resignable,
     canStartProbation,
     waitingOn,
+    documentRequest,
+    resignation,
     templates: getTemplates(),
   }
 }
@@ -62,34 +66,87 @@ export function listPendingApprovals() {
   const db = getDb()
   const items = []
   for (const user of db.users) {
-    if (user.role !== 'employee' || user.status === 'exited') continue
+    if (user.role !== 'employee' || isExited(user)) continue
+    const documents = db.documents.filter((d) => d.userId === user.id)
+    const events = (db.workflowEvents || []).filter((e) => e.userId === user.id)
+    const resignation = [...events].reverse().find((e) => e.step === 13 && e.action === 'complete') || null
+    const req = user.documentRequest
     const nextStep = nextLifecycleStep(user.hrStep)
     const spec = nextStep ? HR_STEPS.find((s) => s.id === nextStep) : null
-    const canRequestResignation = user.hrStep === 12
-    if (canRequestResignation) {
+    const inExit = user.hrStep >= 13
+
+    if (req?.open) {
       items.push({
+        kind: 'documents',
+        priority: inExit ? 0 : 2,
         user: publicUser(user),
-        step: HR_STEPS[12],
+        step: { id: 3, key: 'document_resubmit', label: 'Resubmit documents', actor: 'employee' },
         waitingOn: 'employee',
-        documents: [],
+        documents,
+        note: req.note || '',
+        requestedAt: req.at || null,
       })
-      continue
+    } else if (req?.submitted && (!spec || spec.id !== 4)) {
+      items.push({
+        kind: 'documents',
+        priority: inExit ? 0 : 1,
+        user: publicUser(user),
+        step: { id: 4, key: 'document_review', label: 'Review resubmitted documents', actor: 'hr' },
+        waitingOn: 'hr',
+        documents,
+        note: req.note || '',
+        requestedAt: req.at || null,
+      })
     }
+
+    if (canRequestResignation(user) && !req?.open) {
+      items.push({
+        kind: 'resignation',
+        priority: 3,
+        user: publicUser(user),
+        step: HR_STEPS.find((s) => s.id === 13),
+        waitingOn: 'employee',
+        documents,
+        note: '',
+        requestedAt: null,
+      })
+    }
+
     if (!spec) continue
+    if (req?.open && spec.id === 4) continue
     const waitingOn = spec.actor === 'employee' || spec.actor === 'employee_head' ? 'employee' : 'hr'
     items.push({
+      kind: spec.id >= 13 ? 'resignation' : 'workflow',
+      priority: spec.id >= 13 ? 0 : waitingOn === 'hr' ? 1 : 2,
       user: publicUser(user),
       step: spec,
       waitingOn,
-      documents: spec.id === 4 ? db.documents.filter((d) => d.userId === user.id) : [],
+      documents: spec.id === 4 || spec.id === 16 || spec.id >= 13 ? documents : [],
+      note: spec.id >= 13 ? resignation?.note || '' : '',
+      requestedAt: spec.id >= 13 ? resignation?.at || null : null,
     })
   }
-  return items.sort((a, b) => a.user.name.localeCompare(b.user.name))
+  return items.sort((a, b) => a.priority - b.priority || a.user.name.localeCompare(b.user.name))
+}
+
+function clearDocumentRequest(user, submitted = false) {
+  if (!user.documentRequest) return
+  user.documentRequest = {
+    ...user.documentRequest,
+    open: false,
+    submitted,
+    submittedAt: submitted ? new Date().toISOString() : user.documentRequest.submittedAt,
+  }
 }
 
 export async function completeStep(user, actor, { skip = false, note = '', documents = [], subject, body, start } = {}) {
   const db = getDb()
-  let nextStep = start === 'probation' ? 11 : user.hrStep + 1
+  if (isExited(user)) {
+    const error = new Error('This person has exited and is inactive')
+    error.status = 409
+    throw error
+  }
+  let nextStep = start === 'probation' ? 11 : start === 'resignation' ? 13 : user.hrStep + 1
   if (start === 'probation') {
     if (!isHrRole(actor.role)) {
       const error = new Error('Only HR can start probation review')
@@ -98,6 +155,18 @@ export async function completeStep(user, actor, { skip = false, note = '', docum
     }
     if (user.hrStep < 7 || user.hrStep >= 11) {
       const error = new Error('This person is not in active employment')
+      error.status = 409
+      throw error
+    }
+  }
+  if (start === 'resignation') {
+    if (actor.sub !== user.id) {
+      const error = new Error('The employee must submit the resignation request')
+      error.status = 403
+      throw error
+    }
+    if (!canRequestResignation(user)) {
+      const error = new Error('Resignation can be submitted after joining, before an exit is already in progress')
       error.status = 409
       throw error
     }
@@ -198,6 +267,14 @@ export async function completeStep(user, actor, { skip = false, note = '', docum
   if (nextStep === 18) user.status = 'exited'
   if (nextStep === 7) user.status = 'active'
   if (nextStep === 1) user.status = 'offer'
+  if (user.documentRequest) {
+    if (nextStep === 3) {
+      user.documentRequest = { ...user.documentRequest, open: false, submitted: true, submittedAt: new Date().toISOString() }
+    }
+    if (nextStep === 4 || nextStep === 16) {
+      user.documentRequest = { ...user.documentRequest, open: false, submitted: false }
+    }
+  }
   saveDb()
   return { user: publicUser(user), letter, email, event, journey: getJourney(user.id) }
 }

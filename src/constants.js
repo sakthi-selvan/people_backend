@@ -42,6 +42,15 @@ export function nextLifecycleStep(hrStep) {
   return hrStep + 1
 }
 
+export function isExited(user) {
+  return user?.status === 'exited'
+}
+
+export function canRequestResignation(user) {
+  if (!user || isExited(user) || user.role !== 'employee') return false
+  return user.hrStep >= 7 && user.hrStep < 13
+}
+
 export function isOpsStep(id) {
   return OPS_STEP_IDS.includes(id)
 }

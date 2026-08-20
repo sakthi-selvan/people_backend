@@ -2,10 +2,11 @@ import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import express from 'express'
 import cors from 'cors'
-import { ATTENDANCE_FLOW, HR_STEPS } from './constants.js'
+import { ATTENDANCE_FLOW, HR_STEPS, isExited } from './constants.js'
 import {
   deviceSession,
   hashPassword,
+  INACTIVE_MESSAGE,
   requireAuth,
   sessionPayload,
   verifyPassword,
@@ -40,6 +41,10 @@ app.post('/api/auth/login', async (req, res) => {
   const user = getDb().users.find((u) => u.email === email)
   if (!user || !(await verifyPassword(password, user.passwordHash))) {
     res.status(401).json({ error: 'Invalid email or password' })
+    return
+  }
+  if (isExited(user)) {
+    res.status(403).json({ error: INACTIVE_MESSAGE })
     return
   }
   res.json(sessionPayload(user))
@@ -271,9 +276,13 @@ function kioskUserJson(user, extra = {}) {
 }
 
 app.post('/api/kiosk/identify', requireAuth(['device']), (req, res) => {
-  const match = identifyFace(req.body?.descriptor)
+  const match = identifyFace(req.body?.descriptor, { includeExited: true })
   if (!match) {
     res.json({ match: false })
+    return
+  }
+  if (isExited(match.user)) {
+    res.status(403).json({ error: INACTIVE_MESSAGE, match: true, inactive: true })
     return
   }
   res.json({ match: true, ...kioskUserJson(match.user, { confidence: match.distance }) })
@@ -329,9 +338,13 @@ app.post('/api/kiosk/enroll', requireAuth(['device']), async (req, res) => {
 })
 
 app.post('/api/kiosk/punch', requireAuth(['device']), (req, res) => {
-  const match = identifyFace(req.body?.descriptor)
+  const match = identifyFace(req.body?.descriptor, { includeExited: true })
   if (!match) {
     res.status(404).json({ error: 'Face not recognised. Enrol as a new user first.' })
+    return
+  }
+  if (isExited(match.user)) {
+    res.status(403).json({ error: INACTIVE_MESSAGE })
     return
   }
   if (match.user.hrStep < 7) {
@@ -493,6 +506,15 @@ app.get('/api/leaves', requireAuth(['hr', 'employee']), (req, res) => {
 app.post('/api/leaves', requireAuth(['hr', 'employee']), (req, res) => {
   const { type, from, to, reason, userId } = req.body || {}
   const target = req.actor.role === 'hr' && userId ? userId : req.actor.sub
+  const leaveUser = getDb().users.find((u) => u.id === target)
+  if (!leaveUser) {
+    res.status(404).json({ error: 'Person not found' })
+    return
+  }
+  if (isExited(leaveUser)) {
+    res.status(403).json({ error: 'Inactive people cannot request leave' })
+    return
+  }
   if (!from || !to) {
     res.status(400).json({ error: 'From and to dates are required' })
     return
@@ -596,6 +618,10 @@ app.post('/api/users/:id/documents', requireAuth(['admin', 'hr', 'employee']), (
     res.status(403).json({ error: 'Not allowed' })
     return
   }
+  if (isExited(user)) {
+    res.status(403).json({ error: 'Inactive people cannot add documents' })
+    return
+  }
   const name = String(req.body?.name || '').trim()
   if (!name) {
     res.status(400).json({ error: 'Document name is required' })
@@ -612,6 +638,72 @@ app.post('/api/users/:id/documents', requireAuth(['admin', 'hr', 'employee']), (
   db.documents.push(doc)
   saveDb()
   res.status(201).json(doc)
+})
+
+app.post('/api/users/:id/document-request', requireAuth(['hr']), (req, res) => {
+  const db = getDb()
+  const user = db.users.find((u) => u.id === req.params.id)
+  if (!user) {
+    res.status(404).json({ error: 'User not found' })
+    return
+  }
+  if (isExited(user)) {
+    res.status(409).json({ error: 'This person has exited and cannot upload new documents' })
+    return
+  }
+  user.documentRequest = {
+    open: true,
+    submitted: false,
+    note: String(req.body?.note || '').trim(),
+    at: new Date().toISOString(),
+    by: req.actor.sub,
+  }
+  saveDb()
+  res.json({ user: publicUser(user), journey: getJourney(user.id) })
+})
+
+app.post('/api/users/:id/document-request/submit', requireAuth(['employee']), (req, res) => {
+  const db = getDb()
+  const user = db.users.find((u) => u.id === req.params.id)
+  if (!user) {
+    res.status(404).json({ error: 'User not found' })
+    return
+  }
+  if (req.actor.sub !== user.id) {
+    res.status(403).json({ error: 'Not allowed' })
+    return
+  }
+  if (!user.documentRequest?.open) {
+    res.status(409).json({ error: 'HR has not asked for new documents' })
+    return
+  }
+  user.documentRequest = {
+    ...user.documentRequest,
+    open: false,
+    submitted: true,
+    submittedAt: new Date().toISOString(),
+  }
+  saveDb()
+  res.json({ journey: getJourney(user.id) })
+})
+
+app.post('/api/users/:id/document-request/ack', requireAuth(['hr']), (req, res) => {
+  const db = getDb()
+  const user = db.users.find((u) => u.id === req.params.id)
+  if (!user) {
+    res.status(404).json({ error: 'User not found' })
+    return
+  }
+  if (user.documentRequest) {
+    user.documentRequest = {
+      ...user.documentRequest,
+      open: false,
+      submitted: false,
+      ackedAt: new Date().toISOString(),
+    }
+  }
+  saveDb()
+  res.json({ journey: getJourney(user.id) })
 })
 
 app.get('/api/users/:id/preview/:key', requireAuth(), (req, res) => {

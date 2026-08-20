@@ -11,11 +11,11 @@ export function distance(a, b) {
   return Math.sqrt(sum)
 }
 
-export function identifyFace(descriptor) {
+export function identifyFace(descriptor, { includeExited = false } = {}) {
   if (!Array.isArray(descriptor) || descriptor.length < 64) return null
   let best = null
   for (const user of getDb().users) {
-    if (!Array.isArray(user.faceDescriptor) || user.status === 'exited') continue
+    if (!Array.isArray(user.faceDescriptor) || (!includeExited && user.status === 'exited')) continue
     const d = distance(descriptor, user.faceDescriptor)
     if (d <= FACE_THRESHOLD && (!best || d < best.distance)) {
       best = { user, distance: d }
