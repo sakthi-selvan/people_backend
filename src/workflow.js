@@ -30,8 +30,17 @@ export function getJourney(userId) {
   const documents = db.documents.filter((d) => d.userId === userId)
   const events = (db.workflowEvents || []).filter((e) => e.userId === userId)
   const emails = (db.emails || []).filter((e) => e.userId === userId)
-  const nextStep = user.hrStep >= 18 ? null : user.hrStep + 1
+  const nextStep = user.hrStep >= 18 ? null : user.hrStep === 12 ? null : user.hrStep + 1
   const facePending = user.hrStep >= 6 && user.status !== 'exited' && !user.faceDescriptor
+  const canRequestResignation = user.status !== 'exited' && user.hrStep === 12
+  const spec = nextStep ? HR_STEPS.find((s) => s.id === nextStep) : null
+  const waitingOn = canRequestResignation
+    ? 'employee'
+    : spec
+      ? spec.actor === 'employee' || spec.actor === 'employee_head'
+        ? 'employee'
+        : 'hr'
+      : null
   return {
     user: publicUser(user),
     steps: HR_STEPS,
@@ -41,8 +50,39 @@ export function getJourney(userId) {
     emails,
     nextStep,
     facePending,
+    canRequestResignation,
+    waitingOn,
     templates: getTemplates(),
   }
+}
+
+export function listPendingApprovals() {
+  const db = getDb()
+  const items = []
+  for (const user of db.users) {
+    if (user.role !== 'employee' || user.status === 'exited') continue
+    const nextStep = user.hrStep >= 18 ? null : user.hrStep === 12 ? null : user.hrStep + 1
+    const spec = nextStep ? HR_STEPS.find((s) => s.id === nextStep) : null
+    const canRequestResignation = user.hrStep === 12
+    if (canRequestResignation) {
+      items.push({
+        user: publicUser(user),
+        step: HR_STEPS[12],
+        waitingOn: 'employee',
+        documents: [],
+      })
+      continue
+    }
+    if (!spec) continue
+    const waitingOn = spec.actor === 'employee' || spec.actor === 'employee_head' ? 'employee' : 'hr'
+    items.push({
+      user: publicUser(user),
+      step: spec,
+      waitingOn,
+      documents: spec.id === 4 ? db.documents.filter((d) => d.userId === user.id) : [],
+    })
+  }
+  return items.sort((a, b) => a.user.name.localeCompare(b.user.name))
 }
 
 export async function completeStep(user, actor, { skip = false, note = '', documents = [], subject, body } = {}) {
@@ -55,6 +95,11 @@ export async function completeStep(user, actor, { skip = false, note = '', docum
   }
   if (actor.role === 'employee' && actor.sub !== user.id) {
     const error = new Error('Not allowed')
+    error.status = 403
+    throw error
+  }
+  if (!skip && nextStep === 13 && actor.sub !== user.id) {
+    const error = new Error('The employee must submit the resignation request')
     error.status = 403
     throw error
   }

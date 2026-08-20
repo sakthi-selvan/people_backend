@@ -16,7 +16,7 @@ import { emailPayslip, getMonthAttendance, overlappingSalaries, payrollInsights,
 import { createUser } from './seed.js'
 import { getDb, publicUser, saveDb, dataDir } from './store.js'
 import { todayKey, punchState, syncAttendanceRow, sessionHours, sessionsOf, SHIFT_HOURS, MAX_SESSIONS } from './util.js'
-import { completeStep, getJourney, getTemplates, previewLetter } from './workflow.js'
+import { completeStep, getJourney, getTemplates, previewLetter, listPendingApprovals } from './workflow.js'
 import { TEMPLATE_KEYS } from './templates.js'
 import { saveFacePhoto } from './photos.js'
 
@@ -562,6 +562,10 @@ app.post('/api/holidays', requireAuth(['admin', 'hr']), (req, res) => {
   getDb().holidays.push(holiday)
   saveDb()
   res.status(201).json(holiday)
+})
+
+app.get('/api/approvals', requireAuth(['hr']), (req, res) => {
+  res.json(listPendingApprovals())
 })
 
 app.get('/api/users/:id/journey', requireAuth(), (req, res) => {
